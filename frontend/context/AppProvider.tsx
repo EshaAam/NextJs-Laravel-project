@@ -1,6 +1,7 @@
 "use client";
-import React, { createContext, useState, useEffect, useMemo, ReactNode, useContext } from "react";
+import React, { createContext, useState, useEffect, useMemo, useCallback, ReactNode } from "react";
 import axios from "axios";
+import Cookies from "js-cookie";
 
 type User = {
   id?: string;
@@ -20,6 +21,7 @@ interface AppContextProps {
 }
 
 const STORAGE_KEY = "app_auth_user";
+const TOKEN_KEY = "app_auth_token";
 
 export const AppContext = createContext<AppContextProps>({
   user: null,
@@ -43,62 +45,109 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [loading, setLoading] = useState<boolean>(true);
 
   useEffect(() => {
-    // hydrate from localStorage on mount
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setUserState(parsed);
-        if (parsed?.token) {
-          api.defaults.headers.common["Authorization"] = `Bearer ${parsed.token}`;
+    // hydrate from cookies on mount and validate token
+    const initializeAuth = async () => {
+      try {
+        const token = Cookies.get(TOKEN_KEY);
+        const userData = Cookies.get(STORAGE_KEY);
+        
+        if (token && userData) {
+          const parsed = JSON.parse(userData);
+          
+          // Set the token in axios headers
+          api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
+          
+          try {
+            // Validate token by fetching profile
+            const profile = await api.get("/profile");
+            const freshUserData = profile.data?.data;
+            if (freshUserData) {
+              setUserState({ ...freshUserData, token });
+            } else {
+              // Token is invalid, clear auth
+              clearAuth();
+            }
+          } catch {
+            // Token is invalid or expired, clear auth
+            clearAuth();
+          }
         }
+      } catch (err) {
+        console.warn("Failed to read auth from cookies", err);
+        clearAuth();
+      } finally {
+        setLoading(false);
       }
-    } catch (err) {
-      console.warn("Failed to read auth from storage", err);
-    } finally {
-      setLoading(false);
-    }
+    };
+
+    initializeAuth();
   }, []);
 
-  const persist = (nextUser: User) => {
+  const clearAuth = useCallback(() => {
+    Cookies.remove(TOKEN_KEY);
+    Cookies.remove(STORAGE_KEY);
+    delete api.defaults.headers.common["Authorization"];
+    setUserState(null);
+  }, []);
+
+  const persist = useCallback((nextUser: User) => {
     setUserState(nextUser);
     try {
       if (nextUser) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextUser));
-        if (nextUser.token) api.defaults.headers.common["Authorization"] = `Bearer ${nextUser.token}`;
+        // Store token and user data in separate cookies with security options
+        Cookies.set(TOKEN_KEY, nextUser.token!, {
+          expires: 7, // 7 days
+          secure: process.env.NODE_ENV === 'production', // Only send over HTTPS in production
+          sameSite: 'strict', // CSRF protection
+          path: '/'
+        });
+        
+        // Store user data (without token for security)
+        const userDataWithoutToken = { ...nextUser };
+        delete userDataWithoutToken.token;
+        
+        Cookies.set(STORAGE_KEY, JSON.stringify(userDataWithoutToken), {
+          expires: 7, // 7 days
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          path: '/'
+        });
+        
+        if (nextUser.token) {
+          api.defaults.headers.common["Authorization"] = `Bearer ${nextUser.token}`;
+        }
       } else {
-        localStorage.removeItem(STORAGE_KEY);
-        delete api.defaults.headers.common["Authorization"];
+        clearAuth();
       }
     } catch (err) {
       console.warn("Failed to persist auth", err);
+      clearAuth();
     }
-  };
+  }, [clearAuth]);
 
-  const login = async (email: string, password: string) => {
+  const login = useCallback(async (email: string, password: string) => {
     setLoading(true);
     try {
       const res = await api.post("/login", { email, password });
-      const token = res.data?.token;
+      const { token, user: userData } = res.data;
+      
       if (!token) throw new Error("No token returned from server");
 
       // set header for subsequent requests
       api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
 
-      // fetch profile to get user data
-      const profile = await api.get("/profile");
-      const userData = profile.data?.data || { email };
       const nextUser: User = { ...userData, token };
       persist(nextUser);
     } catch (err) {
-      // rethrow so caller can show error
+      // Clear any existing auth on login failure
+      persist(null);
       throw err;
     } finally {
       setLoading(false);
     }
-  };
+  }, [persist]);
 
-  const register = async (payload: { name: string; email: string; password: string }) => {
+  const register = useCallback(async (payload: { name: string; email: string; password: string }) => {
     setLoading(true);
     try {
       await api.post("/register", payload);
@@ -107,27 +156,26 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } finally {
       setLoading(false);
     }
-  };
+  }, [login]);
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     setLoading(true);
     try {
       // call backend logout if available
       try {
         await api.post("/logout");
-      } catch (_) {
+      } catch {
         // ignore network / server errors on logout
       }
-      delete api.defaults.headers.common["Authorization"];
       persist(null);
     } finally {
       setLoading(false);
     }
-  };
+  }, [persist]);
 
-  const setUser = (u: User) => {
+  const setUser = useCallback((u: User) => {
     persist(u);
-  };
+  }, [persist]);
 
   const value = useMemo(
     () => ({
@@ -139,9 +187,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       register,
       logout,
     }),
-    [user, loading] 
+    [user, loading, login, register, logout, setUser]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 };
-// ...existing code...
