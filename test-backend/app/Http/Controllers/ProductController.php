@@ -43,8 +43,8 @@ class ProductController extends Controller
 
         $data = $request->validate([
             'name' => 'required|string|max:255',
-            // 'description' => 'nullable|string',
-            // 'price' => 'required|numeric',
+            'description' => 'nullable|string',
+            'cost' => 'required|numeric',
         ]);
         $data['user_id'] = $user->id;
         if($request->hasFile('banner_image')) {
@@ -105,8 +105,8 @@ class ProductController extends Controller
 
         $data = $request->validate([
             'name' => 'required|string|max:255',
-            // 'description' => 'nullable|string',
-            // 'price' => 'required|numeric',
+            'description' => 'nullable|string',
+            'cost' => 'required|numeric',
         ]);
         //need to update the image if new image is uploaded and delete the old image from storage
         if($request->hasFile('banner_image')) {
